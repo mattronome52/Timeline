@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Life Timeline</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/timeline.css') }}">
+</head>
+<body>
+    <div class="header">
+        <h1>Life Timeline</h1>
+        <p>Track your life's important moments</p>
+    </div>
+    
+    <div class="add-event-section">
+        <h2>+ Add New Life Event</h2>
+        <form id="eventForm">
+            <div class="form-group">
+                <label for="date">Date:</label>
+                <input type="date" id="date" name="date" required>
+            </div>
+            <div class="form-group">
+                <label for="location">Location:</label>
+                <input type="text" id="location" name="location" placeholder="e.g., France, Norway, New York" required>
+            </div>
+            <div class="form-group">
+                <label for="comment">Event:</label>
+                <textarea id="comment" name="comment" placeholder="e.g., Bike ride from Bordeaux to Toulouse" required></textarea>
+            </div>
+            <button type="submit" class="add-btn">Add Event</button>
+        </form>
+        <div id="errorMessage" class="error-message"></div>
+        <div id="successMessage" class="success-message"></div>
+    </div>
+    
+    <div class="timeline-container">
+        <h2>Your Timeline</h2>
+        <div id="timeline" class="timeline">
+            <div class="timeline-line"></div>
+            <div class="no-events" id="noEvents">No events yet. Add your first life event above!</div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/timeline.js') }}"></script>
+</body>
+</html>
