@@ -1,0 +1,23 @@
+[Unit]
+Description=Private Life Timeline
+After=network.target
+
+[Service]
+Type=simple
+User=exedev
+Group=exedev
+WorkingDirectory=/home/exedev/Timeline
+Environment=TIMELINE_DATABASE=/home/exedev/Timeline/instance/timeline.db
+Environment=TIMELINE_UPLOAD_FOLDER=/home/exedev/Timeline/instance/photos
+ExecStart=/home/exedev/Timeline/.venv/bin/gunicorn --bind 0.0.0.0:8000 --workers 1 --threads 4 --timeout 60 timeline_app:app
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/exedev/Timeline/instance
+
+[Install]
+WantedBy=multi-user.target

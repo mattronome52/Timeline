@@ -1,437 +1,615 @@
-// Timeline Application - Version 4.3 - SCROLLABLE LINEAR SCALE
-// This file contains all client-side logic
-console.log('=== TIMELINE.JS VERSION 4.3 LOADED ===');
+/* Lifeline — local assets, safe DOM rendering, and a natural-flow chronology. */
+'use strict';
+
+const byId = (id) => document.getElementById(id);
+const node = (tag, className, text) => {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    if (text !== undefined) element.textContent = text;
+    return element;
+};
+const makeButton = (text, className, action) => {
+    const button = node('button', className, text);
+    button.type = 'button';
+    button.addEventListener('click', action);
+    return button;
+};
+const plural = (count, singular, multiple = `${singular}s`) => `${count.toLocaleString()} ${count === 1 ? singular : multiple}`;
+const yearText = (year) => String(year).padStart(4, '0');
+const eventPath = (id) => `/api/events/${encodeURIComponent(id)}`;
+const dateValue = (iso) => {
+    const [year, month, day] = iso.split('-').map(Number);
+    const value = new Date(0);
+    value.setUTCFullYear(year, month - 1, day);
+    value.setUTCHours(12, 0, 0, 0);
+    return value;
+};
+const dateFormat = (iso, options = { day: 'numeric', month: 'long', year: 'numeric' }) => new Intl.DateTimeFormat('en-GB', { ...options, timeZone: 'UTC' }).format(dateValue(iso));
+const icon = (name, className = '') => {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('aria-hidden', 'true');
+    if (className) svg.setAttribute('class', className);
+    const paths = {
+        location: ['M20 10c0 6-8 11-8 11S4 16 4 10a8 8 0 1 1 16 0Z', 'M15 10a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z'],
+        edit: ['m15 5 4 4', 'm4 16-1 5 5-1L21 7a2.8 2.8 0 0 0-4-4Z']
+    };
+    for (const d of paths[name] || []) {
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', d);
+        svg.append(path);
+    }
+    return svg;
+};
+// Never use a supplied remote URL for private photos, even if the API is malformed.
+const photoURL = (photo) => `/photos/${encodeURIComponent(photo.id)}`;
 
 class TimelineUI {
     constructor() {
-        this.form = document.getElementById('eventForm');
-        this.timeline = document.getElementById('timeline');
-        this.noEventsMessage = document.getElementById('noEvents');
-        this.errorMessage = document.getElementById('errorMessage');
-        this.successMessage = document.getElementById('successMessage');
-        
-        this.setupEventListeners();
+        this.events = [];
+        this.loaded = false;
+        this.loading = false;
+        this.collapsedYears = new Set();
+        this.editingId = null;
+        this.existingPhotos = [];
+        this.pendingPhotos = [];
+        this.removedPhotos = new Set();
+        this.busy = false;
+        this.deleting = false;
+        this.metadataSaved = false;
+        this.baseline = '';
+        this.returnFocus = null;
+        this.galleryEvent = null;
+        this.galleryIndex = 0;
+        this.form = byId('event-form');
+        this.editor = byId('memory-dialog');
+        this.deleteDialog = byId('delete-dialog');
+        this.photoDialog = byId('photo-dialog');
+        this.timeline = byId('timeline');
+        this.bindEvents();
         this.loadEvents();
     }
-    
-    setupEventListeners() {
-        this.form.addEventListener('submit', (e) => {
-            e.preventDefault();
-            this.addEvent();
+
+    bindEvents() {
+        document.querySelectorAll('[data-open-memory]').forEach((button) => button.addEventListener('click', () => this.openEditor()));
+        byId('search').addEventListener('input', () => this.renderTimeline());
+        byId('decade').addEventListener('change', () => {
+            byId('year').value = '';
+            this.populateYears();
+            this.renderTimeline();
+        });
+        byId('year').addEventListener('change', () => this.renderTimeline());
+        byId('reset-filters').addEventListener('click', () => this.resetFilters());
+        this.form.addEventListener('submit', (event) => { event.preventDefault(); this.saveMemory(); });
+        this.form.addEventListener('input', (event) => {
+            if (event.target.matches('input, textarea')) event.target.setCustomValidity('');
+            if (event.target.id === 'memory-date') this.updateEndDateMinimum();
+        });
+        byId('memory-photos').addEventListener('change', (event) => this.selectPhotos(event.target.files));
+        byId('close-editor').addEventListener('click', () => this.requestEditorClose());
+        byId('cancel-editor').addEventListener('click', () => this.requestEditorClose());
+        this.editor.addEventListener('cancel', (event) => { event.preventDefault(); this.requestEditorClose(); });
+        this.editor.addEventListener('close', () => {
+            this.releasePendingPhotos();
+            this.syncDialogScroll();
+            if (this.returnFocus?.isConnected) this.returnFocus.focus();
+            else document.querySelector('[data-open-memory]').focus();
+        });
+        byId('delete-memory').addEventListener('click', () => this.askDelete());
+        byId('cancel-delete').addEventListener('click', () => { if (!this.deleting) this.deleteDialog.close(); });
+        byId('confirm-delete').addEventListener('click', () => this.deleteMemory());
+        this.deleteDialog.addEventListener('cancel', (event) => { if (this.deleting) event.preventDefault(); });
+        this.deleteDialog.addEventListener('close', () => this.syncDialogScroll());
+        byId('close-photo').addEventListener('click', () => this.photoDialog.close());
+        byId('previous-photo').addEventListener('click', () => this.movePhoto(-1));
+        byId('next-photo').addEventListener('click', () => this.movePhoto(1));
+        this.photoDialog.addEventListener('keydown', (event) => {
+            if (event.key === 'ArrowLeft') { event.preventDefault(); this.movePhoto(-1); }
+            if (event.key === 'ArrowRight') { event.preventDefault(); this.movePhoto(1); }
+        });
+        this.photoDialog.addEventListener('close', () => { byId('full-photo').removeAttribute('src'); this.syncDialogScroll(); });
+        this.photoDialog.addEventListener('click', (event) => {
+            if (event.target === this.photoDialog) {
+                const bounds = this.photoDialog.getBoundingClientRect();
+                if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) this.photoDialog.close();
+            }
+        });
+        window.addEventListener('beforeunload', (event) => {
+            if (this.busy || (this.editor.open && this.hasUnsavedChanges())) { event.preventDefault(); event.returnValue = ''; }
         });
     }
-    
+
+    async request(path, options = {}) {
+        let response;
+        try {
+            response = await fetch(path, { ...options, headers: { Accept: 'application/json', ...options.headers } });
+        } catch (_) {
+            throw new Error('The connection was interrupted. Please check your connection and try again.');
+        }
+        let result;
+        try { result = await response.json(); }
+        catch (_) {
+            if (response.status === 413) throw new Error('These photos are too large to send together. Please choose fewer photos and try again (40 MB per upload).');
+            throw new Error('The server couldn’t complete that request. Please try again.');
+        }
+        if (!response.ok || result.success === false) throw new Error(typeof result.error === 'string' ? result.error : 'Something went wrong. Please try again.');
+        return result;
+    }
+
+    normalizeEvents(events) {
+        if (!Array.isArray(events)) throw new Error('The collection response was incomplete. Please try again.');
+        return events.map((event) => ({ ...event, photos: Array.isArray(event.photos) ? event.photos : [] })).sort((a, b) => b.date.localeCompare(a.date) || String(b.id).localeCompare(String(a.id), undefined, { numeric: true }));
+    }
+
     async loadEvents() {
+        if (this.loading) return;
+        this.loading = true;
+        this.timeline.setAttribute('aria-busy', 'true');
         try {
-            const response = await fetch('/api/events');
-            const data = await response.json();
-            this.displayTimeline(data.events, data.year_marks);
+            const result = await this.request('/api/events');
+            this.events = this.normalizeEvents(result.events);
+            this.loaded = true;
+            byId('page-message').hidden = true;
+            this.populatePeriods();
+            this.renderTimeline();
         } catch (error) {
-            this.showError('Failed to load events');
-            console.error('Load events error:', error);
+            byId('results-summary').textContent = this.loaded ? 'Your last loaded collection is still here.' : 'Your collection is not available yet.';
+            if (this.loaded) this.pageMessage(`${error.message} Your last loaded memories are still shown.`, true, true);
+            else {
+                this.timeline.replaceChildren(this.emptyState('Your memories are still yours.', 'We couldn’t open your collection. Nothing has been changed. Please try again.', 'Try again', () => this.loadEvents(), '↻'));
+                byId('total-count').textContent = '—';
+                byId('collection-range').textContent = 'Your collection is temporarily unavailable';
+            }
+        } finally {
+            this.loading = false;
+            this.timeline.setAttribute('aria-busy', 'false');
         }
     }
-    
-    async addEvent() {
-        const formData = new FormData(this.form);
-        const eventData = {
-            date: formData.get('date'),
-            location: formData.get('location'),
-            comment: formData.get('comment')
+
+    upsertEvent(event) {
+        const index = this.events.findIndex((entry) => String(entry.id) === String(event.id));
+        if (index < 0) this.events.push(event);
+        else this.events[index] = event;
+        this.events = this.normalizeEvents(this.events);
+        this.loaded = true;
+        this.populatePeriods();
+        this.renderTimeline();
+    }
+
+    coveredYears() {
+        const years = new Set();
+        for (const event of this.events) {
+            const first = Number(event.date.slice(0, 4));
+            const last = Number((event.end_date || event.date).slice(0, 4));
+            for (let year = first; year <= last; year += 1) years.add(year);
+        }
+        return [...years].sort((a, b) => b - a);
+    }
+
+    populatePeriods() {
+        const selected = byId('decade').value;
+        const decades = [...new Set(this.coveredYears().map((year) => Math.floor(year / 10) * 10))];
+        byId('decade').replaceChildren(new Option('All decades', ''), ...decades.map((decade) => new Option(`${yearText(decade)}s`, String(decade))));
+        if (decades.map(String).includes(selected)) byId('decade').value = selected;
+        this.populateYears();
+    }
+
+    populateYears() {
+        const decade = byId('decade').value;
+        const selected = byId('year').value;
+        const years = this.coveredYears().filter((year) => decade === '' || Math.floor(year / 10) * 10 === Number(decade));
+        byId('year').replaceChildren(new Option('All years', ''), ...years.map((year) => new Option(yearText(year), String(year))));
+        if (years.map(String).includes(selected)) byId('year').value = selected;
+    }
+
+    resetFilters() {
+        byId('search').value = '';
+        byId('decade').value = '';
+        this.populateYears();
+        byId('year').value = '';
+        this.renderTimeline();
+        byId('search').focus();
+    }
+
+    filteredEvents() {
+        const query = byId('search').value.trim().toLocaleLowerCase();
+        const decade = byId('decade').value;
+        const year = byId('year').value;
+        let start = '';
+        let end = '';
+        if (year !== '') { start = `${yearText(Number(year))}-01-01`; end = `${yearText(Number(year))}-12-31`; }
+        else if (decade !== '') { start = `${yearText(Math.max(1, Number(decade)))}-01-01`; end = `${yearText(Math.min(9999, Number(decade) + 9))}-12-31`; }
+        return this.events.filter((event) => {
+            const matchesText = !query || [event.location, event.comment || '', event.date, event.end_date || '', dateFormat(event.date)].join(' ').toLocaleLowerCase().includes(query);
+            return matchesText && (!start || (event.date <= end && (event.end_date || event.date) >= start));
+        });
+    }
+
+    renderTimeline() {
+        if (!this.loaded) return;
+        const visible = this.filteredEvents();
+        const filtering = Boolean(byId('search').value.trim() || byId('decade').value || byId('year').value);
+        byId('reset-filters').hidden = !filtering;
+        byId('period-hint').hidden = !(byId('decade').value || byId('year').value);
+        byId('total-count').textContent = this.events.length.toLocaleString();
+        byId('total-label').textContent = this.events.length === 1 ? 'moment to look back on' : 'moments to look back on';
+        if (this.events.length) {
+            const first = this.events[this.events.length - 1].date.slice(0, 4);
+            const last = this.events.reduce((max, event) => (event.end_date || event.date) > max ? (event.end_date || event.date) : max, this.events[0].date).slice(0, 4);
+            byId('collection-range').replaceChildren(node('span', '', first === last ? `A chapter of ${first}` : `${first} — ${last}`));
+            if (first !== last) byId('collection-range').append(node('span', 'summary-range-detail', ' · and everything in between'));
+        } else byId('collection-range').textContent = 'Every story starts somewhere';
+        byId('results-summary').textContent = filtering ? `${plural(visible.length, 'memory', 'memories')} found · ${this.events.length.toLocaleString()} in your collection` : `${plural(this.events.length, 'memory', 'memories')} in your collection`;
+        byId('timeline-end').hidden = !visible.length;
+        if (!this.events.length) {
+            this.timeline.replaceChildren(this.emptyState('Begin anywhere.', 'A journey, a new home, an ordinary day that became special. Your first memory belongs here.', 'Add your first memory', () => this.openEditor(), '✳'));
+            return;
+        }
+        if (!visible.length) {
+            this.timeline.replaceChildren(this.emptyState('A moment not yet found.', 'Try another word or a wider window of time. The rest of your collection is right here.', 'Clear filters', () => this.resetFilters(), '⌕'));
+            return;
+        }
+        const fragment = document.createDocumentFragment();
+        const groups = new Map();
+        for (const event of visible) {
+            const year = event.date.slice(0, 4);
+            if (!groups.has(year)) groups.set(year, []);
+            groups.get(year).push(event);
+        }
+        for (const [year, events] of groups) {
+            const details = node('details', 'year-group');
+            details.open = filtering || !this.collapsedYears.has(year);
+            const summary = node('summary', 'year-heading');
+            summary.append(node('h3', 'year-title', year), node('span', 'year-count', plural(events.length, 'memory', 'memories')), node('span', 'year-rule'), node('span', 'year-chevron'));
+            summary.querySelector('.year-rule').setAttribute('aria-hidden', 'true');
+            summary.querySelector('.year-chevron').setAttribute('aria-hidden', 'true');
+            const list = node('div', 'year-events');
+            events.forEach((event) => list.append(this.createMemory(event)));
+            details.append(summary, list);
+            details.addEventListener('toggle', () => {
+                // Detached details may fire a queued toggle after a filter rerender.
+                if (!details.isConnected || filtering) return;
+                if (details.open) this.collapsedYears.delete(year);
+                else this.collapsedYears.add(year);
+            });
+            fragment.append(details);
+        }
+        this.timeline.replaceChildren(fragment);
+    }
+
+    createMemory(event) {
+        const row = node('div', 'memory-row');
+        const date = node('div', 'date-rail');
+        date.setAttribute('aria-hidden', 'true');
+        date.append(node('span', 'date-month', dateFormat(event.date, { month: 'short' })), node('span', 'date-day', event.date.slice(8, 10)));
+        if (event.end_date && event.end_date !== event.date) date.append(node('span', 'date-until', 'a longer chapter'));
+        const point = node('span', 'timeline-node');
+        point.setAttribute('aria-hidden', 'true');
+        const card = node('article', 'memory-card');
+        const heading = node('h4', 'memory-heading', event.location);
+        heading.id = `memory-heading-${event.id}`;
+        card.setAttribute('aria-labelledby', heading.id);
+        const top = node('div', 'memory-top');
+        const location = node('div', 'memory-location');
+        location.append(icon('location', 'location-icon'), heading);
+        const edit = makeButton('', 'edit-button', () => this.openEditor(event));
+        edit.setAttribute('aria-label', `Edit memory in ${event.location}`);
+        edit.append(icon('edit'), node('span', '', 'Edit'));
+        top.append(location, edit);
+        const dateLine = node('div', 'memory-date-line');
+        const time = node('time', '', dateFormat(event.date));
+        time.dateTime = event.date;
+        dateLine.append(time);
+        if (event.end_date) {
+            const end = node('time', '', dateFormat(event.end_date));
+            end.dateTime = event.end_date;
+            dateLine.append(node('span', '', '—'), end, node('span', 'duration-badge', this.duration(event.date, event.end_date)));
+        }
+        card.append(top, dateLine);
+        if (event.comment) card.append(node('p', 'memory-note', event.comment));
+        if (event.photos.length) {
+            const gallery = node('div', 'memory-gallery');
+            gallery.dataset.count = String(event.photos.length);
+            gallery.setAttribute('role', 'group');
+            gallery.setAttribute('aria-label', `Photos from ${event.location}`);
+            event.photos.forEach((photo, index) => {
+                const button = makeButton('', 'photo-thumbnail', () => this.openPhoto(event, index));
+                button.setAttribute('aria-label', `Open photo ${index + 1} of ${event.photos.length} from ${event.location}`);
+                const image = node('img');
+                image.src = photoURL(photo);
+                image.alt = photo.filename || `Photo from ${event.location}`;
+                image.loading = 'lazy';
+                image.decoding = 'async';
+                button.append(image);
+                gallery.append(button);
+            });
+            card.append(gallery);
+        }
+        row.append(date, point, card);
+        return row;
+    }
+
+    duration(start, end) {
+        const first = dateValue(start);
+        const last = dateValue(end);
+        const days = Math.round((last - first) / 86400000) + 1;
+        if (days <= 90) return plural(days, 'day');
+        if (days < 730) return `≈ ${plural(Math.round(days / 30.4375), 'month')}`;
+        return `≈ ${plural(Math.round(days / 365.2425 * 10) / 10, 'year')}`;
+    }
+
+    emptyState(title, description, buttonText, action, symbol) {
+        const container = node('div', 'empty-state');
+        const decoration = node('div', 'empty-symbol', symbol);
+        decoration.setAttribute('aria-hidden', 'true');
+        container.append(decoration, node('h3', '', title), node('p', '', description), makeButton(buttonText, 'button button-primary', action));
+        return container;
+    }
+
+    pageMessage(message, error = false, retry = false) {
+        const element = byId('page-message');
+        element.className = `notice${error ? ' notice-error' : ''}`;
+        element.replaceChildren(node('span', '', message));
+        if (retry) element.append(makeButton('Try again', 'text-button', () => this.loadEvents()));
+        element.hidden = false;
+    }
+
+    formSignature() {
+        return JSON.stringify(['memory-date', 'memory-end-date', 'memory-location', 'memory-note'].map((id) => byId(id).value));
+    }
+
+    hasUnsavedChanges() {
+        return this.formSignature() !== this.baseline || this.pendingPhotos.length > 0 || this.removedPhotos.size > 0;
+    }
+
+    updateEndDateMinimum() {
+        byId('memory-end-date').min = byId('memory-date').value || '0001-01-01';
+        byId('memory-end-date').setCustomValidity('');
+    }
+
+    openEditor(event = null) {
+        this.returnFocus = document.activeElement;
+        this.form.reset();
+        this.form.querySelectorAll('input, textarea').forEach((input) => input.setCustomValidity(''));
+        this.releasePendingPhotos();
+        this.editingId = event?.id ?? null;
+        this.existingPhotos = event ? [...event.photos] : [];
+        this.removedPhotos.clear();
+        this.metadataSaved = false;
+        byId('memory-date').value = event?.date || '';
+        byId('memory-end-date').value = event?.end_date || '';
+        byId('memory-location').value = event?.location || '';
+        byId('memory-note').value = event?.comment || '';
+        byId('dialog-title').textContent = event ? 'Edit a memory' : 'Add a memory';
+        byId('delete-memory').hidden = !event;
+        byId('form-message').hidden = true;
+        byId('photo-feedback').hidden = true;
+        this.updateEndDateMinimum();
+        this.renderPhotoPreviews();
+        this.baseline = this.formSignature();
+        this.editor.showModal();
+        this.editor.scrollTop = 0;
+        this.syncDialogScroll();
+        byId('memory-date').focus({ preventScroll: true });
+    }
+
+    requestEditorClose() {
+        if (this.busy || this.deleting) return;
+        if (this.hasUnsavedChanges() && !window.confirm(this.metadataSaved ? 'Your memory is saved, but some changes are still pending. Discard the unsaved changes?' : 'Leave without saving your changes?')) return;
+        this.editor.close();
+    }
+
+    setBusy(busy) {
+        this.busy = busy;
+        this.form.querySelectorAll('input, textarea, button').forEach((element) => { element.disabled = busy; });
+        byId('close-editor').disabled = busy;
+        byId('save-memory').textContent = busy ? 'Saving…' : 'Save memory ↗';
+        this.form.setAttribute('aria-busy', String(busy));
+    }
+
+    showFormError(message) {
+        const element = byId('form-message');
+        element.textContent = message;
+        element.hidden = false;
+        element.tabIndex = -1;
+        element.focus({ preventScroll: true });
+        element.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+
+    selectPhotos(files) {
+        const errors = [];
+        for (const file of Array.from(files)) {
+            if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || !/\.(jpe?g|png|webp)$/i.test(file.name)) { errors.push(`${file.name}: choose a JPG, PNG, or WebP image.`); continue; }
+            if (file.size > 8 * 1024 * 1024) { errors.push(`${file.name}: this photo is over the 8 MB limit.`); continue; }
+            const count = this.existingPhotos.length - this.removedPhotos.size + this.pendingPhotos.length;
+            if (count >= 8) { errors.push('There’s room for 8 photos per memory. Remove a photo before adding another.'); break; }
+            if (this.pendingPhotos.some((entry) => entry.file.name === file.name && entry.file.size === file.size && entry.file.lastModified === file.lastModified)) continue;
+            this.pendingPhotos.push({ file, preview: URL.createObjectURL(file) });
+        }
+        byId('memory-photos').value = '';
+        const feedback = byId('photo-feedback');
+        feedback.textContent = [...new Set(errors)].join(' ');
+        feedback.hidden = !errors.length;
+        this.renderPhotoPreviews();
+    }
+
+    releasePendingPhotos() {
+        this.pendingPhotos.forEach((entry) => URL.revokeObjectURL(entry.preview));
+        this.pendingPhotos = [];
+    }
+
+    renderPhotoPreviews() {
+        const previews = byId('photo-previews');
+        const focusedIndex = [...previews.querySelectorAll('button')].indexOf(document.activeElement);
+        const fragment = document.createDocumentFragment();
+        const preview = (src, filename, removed, action, pending) => {
+            const figure = node('figure', `photo-preview${removed ? ' is-removed' : ''}`);
+            const image = node('img');
+            image.src = src;
+            image.alt = filename;
+            const caption = node('figcaption', '', removed ? 'Will be removed' : (pending ? `New · ${filename}` : filename));
+            caption.title = filename;
+            const remove = makeButton(removed ? '↶' : '×', 'remove-photo', action);
+            remove.setAttribute('aria-label', `${removed ? 'Keep' : 'Remove'} photo ${filename}`);
+            figure.append(image, caption, remove);
+            fragment.append(figure);
         };
-        
+        for (const photo of this.existingPhotos) {
+            const removed = this.removedPhotos.has(String(photo.id));
+            preview(photoURL(photo), photo.filename || 'Saved photo', removed, () => {
+                if (removed) {
+                    if (this.existingPhotos.length - this.removedPhotos.size + this.pendingPhotos.length >= 8) {
+                        byId('photo-feedback').textContent = 'Remove another photo first to stay within the 8-photo limit.';
+                        byId('photo-feedback').hidden = false;
+                        return;
+                    }
+                    this.removedPhotos.delete(String(photo.id));
+                } else this.removedPhotos.add(String(photo.id));
+                this.renderPhotoPreviews();
+            }, false);
+        }
+        this.pendingPhotos.forEach((entry, index) => preview(entry.preview, entry.file.name, false, () => {
+            URL.revokeObjectURL(entry.preview);
+            this.pendingPhotos.splice(index, 1);
+            this.renderPhotoPreviews();
+        }, true));
+        previews.replaceChildren(fragment);
+        if (focusedIndex >= 0) {
+            const nextButton = previews.querySelectorAll('button')[focusedIndex];
+            (nextButton || byId('memory-photos')).focus({ preventScroll: true });
+        }
+        byId('photo-count').textContent = `${this.existingPhotos.length - this.removedPhotos.size + this.pendingPhotos.length} / 8`;
+    }
+
+    async saveMemory() {
+        if (this.busy) return;
+        byId('memory-location').setCustomValidity(byId('memory-location').value.trim() ? '' : 'Please enter a location.');
+        const start = byId('memory-date').value;
+        const end = byId('memory-end-date').value;
+        byId('memory-end-date').setCustomValidity(end && end < start ? 'The end date must be on or after the start date.' : '');
+        if (!this.form.reportValidity()) return;
+        if (this.existingPhotos.length - this.removedPhotos.size + this.pendingPhotos.length > 8) { this.showFormError('Please keep no more than 8 photos per memory.'); return; }
+        const creating = this.editingId === null;
+        const payload = { date: start, end_date: end || null, location: byId('memory-location').value.trim(), comment: byId('memory-note').value.trim() };
+        byId('form-message').hidden = true;
+        this.setBusy(true);
+        let metadataSaved = false;
         try {
-            const response = await fetch('/api/events', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(eventData)
-            });
-            
-            const result = await response.json();
-            
-            if (result.success) {
-                this.form.reset();
-                this.hideError();
-                this.showSuccess('Event added successfully!');
-                this.loadEvents();
-                setTimeout(() => this.hideSuccess(), 3000);
-            } else {
-                this.showError(result.error);
+            const result = await this.request(creating ? '/api/events' : eventPath(this.editingId), { method: creating ? 'POST' : 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+            if (!result.event?.id) throw new Error('The server did not confirm this memory. Please reload your collection before trying to add it again.');
+            // Retain the new ID immediately: a photo failure must never create another event.
+            this.editingId = result.event.id;
+            this.metadataSaved = true;
+            metadataSaved = true;
+            this.existingPhotos = result.event.photos || this.existingPhotos;
+            this.upsertEvent({ ...result.event, photos: this.existingPhotos });
+            byId('delete-memory').hidden = false;
+            byId('dialog-title').textContent = 'Edit a memory';
+            this.baseline = this.formSignature();
+            for (const photoId of [...this.removedPhotos]) {
+                const deleted = await this.request(`${eventPath(this.editingId)}/photos/${encodeURIComponent(photoId)}`, { method: 'DELETE' });
+                this.removedPhotos.delete(photoId);
+                this.existingPhotos = deleted.event?.photos || this.existingPhotos.filter((photo) => String(photo.id) !== photoId);
+                const cached = this.events.find((event) => String(event.id) === String(this.editingId));
+                this.upsertEvent(deleted.event || { ...cached, photos: [...this.existingPhotos] });
             }
+            if (this.pendingPhotos.length) {
+                const data = new FormData();
+                this.pendingPhotos.forEach((entry) => data.append('photos', entry.file));
+                const uploaded = await this.request(`${eventPath(this.editingId)}/photos`, { method: 'POST', body: data });
+                if (!uploaded.event) throw new Error('The server did not confirm the uploaded photos. Please review the saved photos before trying again.');
+                this.existingPhotos = uploaded.event.photos || [];
+                this.upsertEvent(uploaded.event);
+                this.releasePendingPhotos();
+            }
+            this.removedPhotos.clear();
+            this.pageMessage(creating ? 'A new moment, safely kept.' : 'Your memory has been updated.');
+            this.editor.close();
         } catch (error) {
-            this.showError('Failed to add event');
+            if (metadataSaved) {
+                // Refresh cache after partial photo mutations, without touching entered fields or selections.
+                try {
+                    const latest = await this.request('/api/events');
+                    this.events = this.normalizeEvents(latest.events);
+                    const saved = this.events.find((event) => String(event.id) === String(this.editingId));
+                    if (saved) {
+                        this.existingPhotos = [...saved.photos];
+                        for (const id of this.removedPhotos) if (!saved.photos.some((photo) => String(photo.id) === id)) this.removedPhotos.delete(id);
+                    }
+                    this.populatePeriods();
+                    this.renderTimeline();
+                } catch (_) { /* Already-confirmed metadata and photo changes remain cached. */ }
+                this.renderPhotoPreviews();
+                this.showFormError(`Your memory is saved, but some photo changes could not be saved. ${error.message} Your selections are still here. Review the saved photos before retrying.`);
+                this.pageMessage('Your memory was saved. Finish the remaining photo changes in the open editor.', true);
+            } else this.showFormError(error.message);
+        } finally {
+            this.setBusy(false);
         }
     }
-    
-    async deleteEvent(eventId) {
-        if (!confirm('Are you sure you want to delete this event?')) {
-            return;
-        }
-        
+
+    askDelete() {
+        if (this.busy || this.editingId === null) return;
+        byId('delete-location').textContent = byId('memory-location').value || 'This memory';
+        byId('delete-error').hidden = true;
+        this.deleteDialog.showModal();
+        byId('cancel-delete').focus();
+        this.syncDialogScroll();
+    }
+
+    async deleteMemory() {
+        if (this.deleting || this.editingId === null) return;
+        this.deleting = true;
+        byId('confirm-delete').disabled = true;
+        byId('cancel-delete').disabled = true;
+        byId('confirm-delete').textContent = 'Deleting…';
         try {
-            const response = await fetch(`/api/events/${eventId}`, {
-                method: 'DELETE'
-            });
-            
-            const result = await response.json();
-            
-            if (result.success) {
-                this.showSuccess('Event deleted successfully!');
-                this.loadEvents();
-                setTimeout(() => this.hideSuccess(), 3000);
-            } else {
-                this.showError('Failed to delete event');
-            }
+            await this.request(eventPath(this.editingId), { method: 'DELETE' });
+            this.events = this.events.filter((event) => String(event.id) !== String(this.editingId));
+            this.populatePeriods();
+            this.renderTimeline();
+            this.deleteDialog.close();
+            this.editor.close();
+            this.pageMessage('The memory and its photos have been deleted.');
         } catch (error) {
-            this.showError('Failed to delete event');
+            byId('delete-error').textContent = error.message;
+            byId('delete-error').hidden = false;
+        } finally {
+            this.deleting = false;
+            byId('confirm-delete').disabled = false;
+            byId('cancel-delete').disabled = false;
+            byId('confirm-delete').textContent = 'Delete memory';
         }
     }
-    
-    calculateTimelinePosition(date, startDate, endDate) {
-        const start = new Date(startDate);
-        const end = new Date(endDate);
-        const current = new Date(date);
-        
-        const totalDuration = end - start;
-        const currentPosition = current - start;
-        
-        const percentage = (currentPosition / totalDuration);
-        return 5 + (percentage * 90);
+
+    openPhoto(event, index) {
+        this.galleryEvent = event;
+        this.galleryIndex = index;
+        this.renderFullPhoto();
+        this.photoDialog.showModal();
+        this.syncDialogScroll();
+        byId('close-photo').focus();
     }
-    
-    calculateDynamicPositions(events, startDateStr, endDateStr, timelineHeightPx) {
-        const sortedEvents = [...events].sort((a, b) => new Date(a.date) - new Date(b.date));
-        
-        const positions = sortedEvents.map(event => {
-            const basePos = this.calculateTimelinePosition(event.date, startDateStr, endDateStr);
-            console.log(`Event ${event.formatted_date}: base position ${basePos}%`);
-            return {
-                event: event,
-                basePosition: basePos,
-                finalPosition: basePos
-            };
-        });
-        
-        // If timelineHeightPx is provided, use pixel-based separation
-        // Otherwise fall back to percentage-based
-        if (timelineHeightPx) {
-            const minSeparationPx = 60; // Minimum 60 pixels between events
-            
-            for (let i = 1; i < positions.length; i++) {
-                const prevPosPx = (positions[i-1].finalPosition / 100) * timelineHeightPx;
-                const currentPosPx = (positions[i].basePosition / 100) * timelineHeightPx;
-                const distance = currentPosPx - prevPosPx;
-                
-                if (distance < minSeparationPx) {
-                    // Push this event down in pixels, then convert back to percentage
-                    const newPosPx = prevPosPx + minSeparationPx;
-                    const newPosPercent = (newPosPx / timelineHeightPx) * 100;
-                    positions[i].finalPosition = newPosPercent;
-                    console.log(`Moved event ${positions[i].event.formatted_date} from ${positions[i].basePosition}% to ${newPosPercent}%`);
-                }
-            }
-        } else {
-            // Old percentage-based logic for backward compatibility
-            const minSeparation = 12;
-            
-            for (let i = 1; i < positions.length; i++) {
-                let currentPos = positions[i].finalPosition;
-                const prevPos = positions[i-1].finalPosition;
-                const distance = currentPos - prevPos;
-                
-                if (distance < minSeparation) {
-                    currentPos = prevPos + minSeparation;
-                    positions[i].finalPosition = currentPos;
-                    console.log(`Moved event ${positions[i].event.formatted_date} from ${positions[i].basePosition}% to ${currentPos}%`);
-                }
-            }
-        }
-        
-        return positions;
+
+    movePhoto(direction) {
+        if (!this.galleryEvent?.photos.length) return;
+        this.galleryIndex = (this.galleryIndex + direction + this.galleryEvent.photos.length) % this.galleryEvent.photos.length;
+        this.renderFullPhoto();
     }
-    
-    displayTimeline(events, yearMarks) {
-        try {
-            console.log('=== displayTimeline START ===');
-            console.log(`Events: ${events.length}, Year marks: ${yearMarks ? yearMarks.length : 0}`);
-            
-            this.timeline.innerHTML = '<div class="timeline-line"></div>';
-            
-            if (events.length === 0) {
-                this.timeline.appendChild(this.noEventsMessage);
-                return;
-            }
-            
-            const allEventDates = events.map(e => e.date);
-            const minDate = Math.min(...allEventDates.map(d => new Date(d)));
-            const maxDate = Math.max(...allEventDates.map(d => new Date(d)));
-            const paddingDays = 60;
-            const paddedStart = new Date(minDate);
-            paddedStart.setDate(paddedStart.getDate() - paddingDays);
-            const paddedEnd = new Date(maxDate);
-            paddedEnd.setDate(paddedEnd.getDate() + paddingDays);
-            
-            const startDateStr = paddedStart.toISOString().split('T')[0];
-            const endDateStr = paddedEnd.toISOString().split('T')[0];
-            
-            // First pass: calculate positions with percentage-based logic to get initial layout
-            const eventPositions = this.calculateDynamicPositions(events, startDateStr, endDateStr, null);
-            
-            const maxFinalPosition = Math.max(...eventPositions.map(p => p.finalPosition));
-            console.log(`Max final position: ${maxFinalPosition}%`);
-            
-            // Calculate required height based on two factors:
-            // 1. Year marks need space (minimum ~30px per year to avoid overlap)
-            // 2. Events need separation (12% minimum between displaced events)
-            
-            // Use the allEventDates already calculated above
-            const yearSpan = (maxDate - minDate) / (1000 * 60 * 60 * 24 * 365.25); // Years
-            
-            const minSeparation = 12; // Percentage separation for events
-            const baseHeight = 400;
-            const minPixelsPerYear = 30; // Minimum pixels per year to prevent year mark overlap
-            
-            // Calculate height needed for clear year markers
-            const heightForYears = yearSpan * minPixelsPerYear;
-            
-            // Calculate height needed for event separation
-            const heightForPosition = maxFinalPosition > 90 ? 
-                (maxFinalPosition / 90) * baseHeight : baseHeight;
-            const heightForDensity = (events.length * minSeparation * baseHeight) / 90;
-            
-            // Use the maximum of all three requirements
-            const requiredHeight = Math.max(heightForYears, heightForPosition, heightForDensity);
-            const finalTimelineHeight = Math.ceil(requiredHeight * 1.1); // 10% buffer
-            
-            console.log(`Scale calculation: yearSpan=${yearSpan.toFixed(1)}y, heightForYears=${heightForYears}px, heightForEvents=${heightForPosition}px, heightForDensity=${heightForDensity}px`);
-            console.log(`Final timeline height: ${finalTimelineHeight}px`);
-            
-            if (finalTimelineHeight > baseHeight) {
-                this.timeline.style.minHeight = `${finalTimelineHeight}px`;
-                this.timeline.style.height = `${finalTimelineHeight}px`;
-                this.timeline.style.maxHeight = 'none';
-                
-                const container = this.timeline.closest('.timeline-container');
-                if (container) {
-                    // Container has a max viewable height, content scrolls
-                    const maxViewHeight = 800; // Maximum visible height before scrolling
-                    const containerHeight = Math.min(finalTimelineHeight + 120, maxViewHeight + 120);
-                    
-                    container.style.minHeight = `${containerHeight}px`;
-                    container.style.height = `${containerHeight}px`;
-                    container.style.maxHeight = `${maxViewHeight + 120}px`;
-                    container.style.overflowY = 'auto'; // Enable vertical scrolling
-                    container.style.overflowX = 'visible';
-                    
-                    console.log(`Container: viewable=${containerHeight}px, scrollable to ${finalTimelineHeight}px`);
-                }
-                
-                const timelineLine = this.timeline.querySelector('.timeline-line');
-                if (timelineLine) {
-                    timelineLine.style.height = `${finalTimelineHeight * 0.9}px`;
-                    timelineLine.style.bottom = 'auto';
-                }
-                
-                // Second pass: recalculate positions with pixel-based collision for the expanded timeline
-                const recalculatedPositions = this.calculateDynamicPositions(events, startDateStr, endDateStr, finalTimelineHeight);
-                
-                // Get final timeline height for pixel calculations (AFTER expansion)
-                const containerHeight = this.timeline.offsetHeight;
-                console.log(`Timeline height for positioning: ${containerHeight}px`);
-                
-                // Render year marks with expanded height
-                console.log('Rendering year marks...');
-                this.renderYearMarks(yearMarks, containerHeight, startDateStr, endDateStr);
-                
-                // Render events with expanded height and recalculated positions
-                console.log('Rendering events...');
-                this.renderEvents(recalculatedPositions, containerHeight);
-            } else {
-                // No expansion needed, use original positions
-                const containerHeight = this.timeline.offsetHeight;
-                console.log(`Timeline height for positioning: ${containerHeight}px`);
-                
-                this.renderYearMarks(yearMarks, containerHeight, startDateStr, endDateStr);
-                this.renderEvents(eventPositions, containerHeight);
-            }
-            
-            console.log('=== displayTimeline END ===');
-            
-        } catch (error) {
-            console.error('ERROR in displayTimeline:', error);
-            console.error('Stack trace:', error.stack);
-            this.showError('Failed to display timeline: ' + error.message);
-        }
+
+    renderFullPhoto() {
+        const photo = this.galleryEvent.photos[this.galleryIndex];
+        byId('full-photo').src = photoURL(photo);
+        byId('full-photo').alt = `${photo.filename || 'Memory photo'} — ${this.galleryEvent.location}`;
+        byId('photo-title').textContent = `${this.galleryEvent.location} · ${dateFormat(this.galleryEvent.date)}`;
+        byId('photo-position').textContent = `${this.galleryIndex + 1} of ${this.galleryEvent.photos.length}`;
+        byId('previous-photo').hidden = this.galleryEvent.photos.length < 2;
+        byId('next-photo').hidden = this.galleryEvent.photos.length < 2;
     }
-    
-    renderYearMarks(yearMarks, containerHeight, startDateStr, endDateStr) {
-        if (!yearMarks || yearMarks.length === 0) {
-            console.log('No year marks to render');
-            return;
-        }
-        
-        console.log(`Year marks date range: ${startDateStr} to ${endDateStr}`);
-        
-        yearMarks.forEach(yearMark => {
-            const position = this.calculateTimelinePosition(
-                yearMark.date, 
-                startDateStr,
-                endDateStr
-            );
-            
-            const positionInPixels = (position / 100) * containerHeight;
-            
-            console.log(`Year ${yearMark.formatted_date}: ${position}% = ${positionInPixels}px`);
-            
-            const yearElement = document.createElement('div');
-            yearElement.className = 'year-mark';
-            yearElement.style.top = `${positionInPixels}px`;
-            
-            const tickClass = yearMark.type === 'event' ? 'event-year' : 
-                            yearMark.type === 'decade' ? 'decade-year' : '';
-            const labelClass = tickClass;
-            
-            yearElement.innerHTML = `
-                <div class="year-tick ${tickClass}"></div>
-                <div class="year-label ${labelClass}">${yearMark.formatted_date}</div>
-            `;
-            this.timeline.appendChild(yearElement);
-        });
-        
-        console.log(`Rendered ${yearMarks.length} year marks`);
-    }
-    
-    renderEvents(eventPositions, containerHeight) {
-        console.log('>>> renderEvents called - VERSION 4.1 <<<');
-        eventPositions.forEach((posData, index) => {
-            const event = posData.event;
-            const position = posData.finalPosition;
-            const basePosition = posData.basePosition;
-            
-            const eventElement = this.createEventElement(event, index);
-            
-            // Use basePosition for the event location (its chronological position)
-            // Only use finalPosition if it was moved due to collision
-            const displayPosition = position;
-            const positionInPixels = (displayPosition / 100) * containerHeight;
-            
-            eventElement.style.top = `${positionInPixels}px`;
-            eventElement.style.transform = 'translateY(-50%)';
-            
-            console.log(`Event ${event.formatted_date}: positioned at ${positionInPixels}px (${displayPosition}%)`);
-            console.log(`  Base: ${basePosition}%, Final: ${position}%`);
-            
-            this.timeline.appendChild(eventElement);
-            
-            // ALWAYS add green connector line from event dot to timeline
-            const isLeftSide = index % 2 === 0;
-            this.createEventConnector(basePosition, position, containerHeight, isLeftSide);
-        });
-        
-        console.log(`Rendered ${eventPositions.length} events`);
-    }
-    
-    createEventConnector(basePosition, finalPosition, containerHeight, isLeftSide) {
-        // Create SVG line from event's green dot to the timeline date position
-        const basePositionPx = (basePosition / 100) * containerHeight;
-        const finalPositionPx = (finalPosition / 100) * containerHeight;
-        
-        // Start point: event's green dot position (where the event is displayed)
-        const startY = finalPositionPx;
-        
-        // End point: timeline center at the ACTUAL date position
-        const endY = basePositionPx;
-        
-        // Create SVG container
-        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-        svg.style.position = 'absolute';
-        svg.style.top = '0';
-        svg.style.left = '0';
-        svg.style.width = '100%';
-        svg.style.height = '100%';
-        svg.style.pointerEvents = 'none';
-        svg.style.zIndex = '4';
-        
-        // Create line
-        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-        
-        // Convert percentages to actual pixels for SVG
-        const timelineWidth = this.timeline.offsetWidth;
-        
-        // Start from the green dot (40% from left for left-side, 60% for right-side)
-        // The dot is at the edge of the event box facing the timeline
-        const startXPx = isLeftSide ? timelineWidth * 0.40 : timelineWidth * 0.60;
-        const endXPx = timelineWidth * 0.50; // Timeline center
-        
-        line.setAttribute('x1', startXPx);
-        line.setAttribute('y1', startY);
-        line.setAttribute('x2', endXPx);
-        line.setAttribute('y2', endY);
-        line.setAttribute('stroke', '#4CAF50');
-        line.setAttribute('stroke-width', '2');
-        line.setAttribute('opacity', '0.6');
-        
-        svg.appendChild(line);
-        this.timeline.appendChild(svg);
-        
-        console.log(`Green connector: from (${startXPx}, ${startY}) to (${endXPx}, ${endY})`);
-        console.log(`  Event at ${finalPositionPx}px, date at ${basePositionPx}px`);
-    }
-    
-    createEventElement(event, index) {
-        const eventElement = document.createElement('div');
-        eventElement.className = 'timeline-event';
-        
-        if (index % 2 === 0) {
-            eventElement.classList.add('left-side');
-        } else {
-            eventElement.classList.add('right-side');
-        }
-        
-        // Initially show only the event description (comment)
-        eventElement.innerHTML = `
-            <button class="delete-btn" onclick="app.deleteEvent(${event.id})">×</button>
-            <div class="event-comment">${event.comment}</div>
-            <div class="event-details" style="display: none;">
-                <div class="event-location">${event.location}</div>
-                <div class="event-date">${event.formatted_date}</div>
-            </div>
-        `;
-        
-        // Toggle details on click
-        eventElement.addEventListener('click', (e) => {
-            // Don't toggle if clicking delete button
-            if (e.target.classList.contains('delete-btn')) return;
-            
-            const details = eventElement.querySelector('.event-details');
-            const isExpanded = details.style.display !== 'none';
-            details.style.display = isExpanded ? 'none' : 'block';
-            eventElement.classList.toggle('expanded', !isExpanded);
-        });
-        
-        return eventElement;
-    }
-    
-    showError(message) {
-        this.errorMessage.textContent = message;
-        this.errorMessage.style.display = 'block';
-        this.hideSuccess();
-    }
-    
-    hideError() {
-        this.errorMessage.style.display = 'none';
-    }
-    
-    showSuccess(message) {
-        this.successMessage.textContent = message;
-        this.successMessage.style.display = 'block';
-        this.hideError();
-    }
-    
-    hideSuccess() {
-        this.successMessage.style.display = 'none';
+
+    syncDialogScroll() {
+        document.body.classList.toggle('dialog-open', Boolean(document.querySelector('dialog[open]')));
     }
 }
 
-// Initialize the application when DOM is ready
 const app = new TimelineUI();

@@ -3,44 +3,69 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Life Timeline</title>
+    <meta name="theme-color" content="#f6f4ec">
+    <meta name="description" content="A private place for the places, chapters, and little moments that make a life.">
+    <title>Lifeline — Your life, in moments</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/timeline.css') }}">
+    <script src="{{ url_for('static', filename='js/timeline.js') }}" defer></script>
 </head>
 <body>
-    <div class="header">
-        <h1>Life Timeline</h1>
-        <p>Track your life's important moments</p>
+    <a class="skip-link" href="#collection">Skip to your timeline</a>
+    <div class="page-shell">
+        <header class="site-header">
+            <a class="wordmark" href="/" aria-label="Lifeline home"><span class="brand-mark" aria-hidden="true"><span></span></span>lifeline<span class="wordmark-period">.</span></a>
+            <div class="header-end">
+                <span class="privacy-label"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="6" y="10" width="12" height="10" rx="2"/><path d="M9 10V7a3 3 0 0 1 6 0v3"/></svg>Your private history</span>
+                <a class="export-link" href="/api/export" download="lifeline-notes.json" title="Download dates, locations, notes, and photo metadata as JSON. Photo files are not included.">Export notes <span aria-hidden="true">↗</span><span class="sr-only"> as JSON, without photo files</span></a>
+            </div>
+        </header>
+        <main>
+            <section class="intro" aria-labelledby="page-title">
+                <div class="intro-copy">
+                    <p class="eyebrow"><span aria-hidden="true"></span>A PERSONAL TIMELINE</p>
+                    <h1 id="page-title">Your life,<br><em>in moments.</em></h1>
+                    <p class="intro-description">A little space for the moments that stayed.</p>
+                    <button class="button button-primary add-memory" type="button" data-open-memory><span class="plus" aria-hidden="true">+</span> Add a memory</button>
+                </div>
+                <aside class="archive-summary" aria-label="Your collection at a glance">
+                    <div class="summary-ornament" aria-hidden="true"><span></span><i></i><span></span></div>
+                    <p class="summary-count" id="total-count">—</p>
+                    <p class="summary-caption" id="total-label">moments to look back on</p>
+                    <p class="summary-range" id="collection-range">Your story, one memory at a time</p>
+                    <span class="summary-bottom" aria-hidden="true">COLLECT MOMENTS, NOT THINGS</span>
+                </aside>
+            </section>
+            <section class="collection" id="collection" aria-labelledby="collection-title">
+                <div class="section-heading"><div class="section-title-wrap"><span class="section-number" aria-hidden="true">01 /</span><h2 id="collection-title">The collection</h2></div><span class="sort-label">NEWEST FIRST <span aria-hidden="true">↓</span></span></div>
+                <div class="filter-bar" role="search" aria-label="Find a memory">
+                    <div class="search-wrap"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.7" cy="10.7" r="6.7"/><path d="m16 16 4.5 4.5"/></svg><label class="sr-only" for="search">Search locations and notes</label><input type="search" id="search" placeholder="Find a place, a word, a memory…" autocomplete="off"></div>
+                    <div class="period-controls"><label class="sr-only" for="decade">Filter by decade</label><select id="decade"><option value="">All decades</option></select><label class="sr-only" for="year">Filter by year</label><select id="year"><option value="">All years</option></select><button class="reset-button" id="reset-filters" type="button" hidden>Reset</button></div>
+                </div>
+                <div class="collection-meta"><p id="results-summary" role="status" aria-live="polite">Opening your collection…</p><span class="reading-note" id="reading-note">A story, not a scale</span></div>
+                <p class="period-hint" id="period-hint" hidden>Includes memories that overlap this period, grouped by the year they began.</p>
+                <div id="page-message" class="notice" role="status" aria-live="polite" hidden></div>
+                <div class="timeline" id="timeline" aria-busy="true"><div class="loading-state"><span class="loading-dot" aria-hidden="true"></span><p>Gathering your moments…</p></div></div>
+                <noscript><div class="empty-state"><h3>A little JavaScript is needed.</h3><p>Please enable JavaScript to open and add to your private timeline.</p></div></noscript>
+                <div class="timeline-end" id="timeline-end" hidden><span aria-hidden="true">✳</span><p>Every life has a story.<br><em>This one is yours.</em></p></div>
+            </section>
+        </main>
+        <footer class="site-footer"><span class="footer-wordmark">lifeline.</span><p>A place for what matters.</p><span class="footer-private">Private by nature. Personal by you.</span></footer>
     </div>
-    
-    <div class="add-event-section">
-        <h2>+ Add New Life Event</h2>
-        <form id="eventForm">
-            <div class="form-group">
-                <label for="date">Date:</label>
-                <input type="date" id="date" name="date" required>
-            </div>
-            <div class="form-group">
-                <label for="location">Location:</label>
-                <input type="text" id="location" name="location" placeholder="e.g., France, Norway, New York" required>
-            </div>
-            <div class="form-group">
-                <label for="comment">Event:</label>
-                <textarea id="comment" name="comment" placeholder="e.g., Bike ride from Bordeaux to Toulouse" required></textarea>
-            </div>
-            <button type="submit" class="add-btn">Add Event</button>
+    <dialog class="memory-dialog" id="memory-dialog" aria-labelledby="dialog-title" aria-describedby="dialog-description">
+        <div class="dialog-top"><p class="eyebrow">A MOMENT TO KEEP</p><button class="icon-button close-dialog" id="close-editor" type="button" aria-label="Close memory form">×</button></div>
+        <h2 id="dialog-title">Add a memory</h2>
+        <p class="dialog-description" id="dialog-description">Big adventures, small beginnings, and everything in between.</p>
+        <form id="event-form">
+            <div class="date-fields"><div class="form-field"><label for="memory-date">Date <span class="required-word">required</span></label><input id="memory-date" name="date" type="date" min="0001-01-01" max="9999-12-31" required></div><div class="form-field"><label for="memory-end-date">End date <span class="optional-word">optional</span></label><input id="memory-end-date" name="end_date" type="date" min="0001-01-01" max="9999-12-31" aria-describedby="end-date-hint"></div></div>
+            <p class="field-hint date-hint" id="end-date-hint">A longer chapter? Add an end date for a trip, a home, or a season of life.</p>
+            <div class="form-field"><label for="memory-location">Location <span class="required-word">required</span></label><input id="memory-location" name="location" type="text" maxlength="240" placeholder="A city, a country, a place that means something…" autocomplete="off" required></div>
+            <div class="form-field"><label for="memory-note">The story <span class="optional-word">optional</span></label><textarea id="memory-note" name="comment" rows="3" maxlength="10000" placeholder="What would you like to remember?"></textarea></div>
+            <div class="form-field photo-field"><div class="photo-field-heading"><label for="memory-photos">Photos <span class="optional-word">optional</span></label><span id="photo-count">0 / 8</span></div><p class="field-hint" id="photo-hint">Up to 8 JPG, PNG, or WebP photos, 8 MB each. Choose a few details worth keeping.</p><div class="photo-previews" id="photo-previews"></div><label class="photo-picker" for="memory-photos"><span aria-hidden="true">＋</span><span>Add photos</span><input id="memory-photos" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" multiple aria-describedby="photo-hint photo-feedback"></label><p class="field-feedback" id="photo-feedback" role="status" aria-live="polite" hidden></p></div>
+            <div class="notice notice-error form-message" id="form-message" role="alert" hidden></div>
+            <div class="dialog-actions"><button class="text-button delete-memory" id="delete-memory" type="button" hidden>Delete memory</button><div class="dialog-actions-end"><button class="button button-secondary" id="cancel-editor" type="button">Cancel</button><button class="button button-primary" id="save-memory" type="submit">Save memory <span aria-hidden="true">↗</span></button></div></div>
         </form>
-        <div id="errorMessage" class="error-message"></div>
-        <div id="successMessage" class="success-message"></div>
-    </div>
-    
-    <div class="timeline-container">
-        <h2>Your Timeline</h2>
-        <div id="timeline" class="timeline">
-            <div class="timeline-line"></div>
-            <div class="no-events" id="noEvents">No events yet. Add your first life event above!</div>
-        </div>
-    </div>
-
-    <script src="{{ url_for('static', filename='js/timeline.js') }}"></script>
+    </dialog>
+    <dialog class="confirm-dialog" id="delete-dialog" aria-labelledby="delete-title" aria-describedby="delete-description"><p class="eyebrow">A SMALL PAUSE</p><h2 id="delete-title">Let this memory go?</h2><p id="delete-description">This will permanently delete this memory and its photos. It can’t be undone.</p><p class="delete-location" id="delete-location"></p><div class="notice notice-error" id="delete-error" role="alert" hidden></div><div class="confirm-actions"><button class="button button-secondary" id="cancel-delete" type="button" autofocus>Keep memory</button><button class="button button-danger" id="confirm-delete" type="button">Delete memory</button></div></dialog>
+    <dialog class="photo-dialog" id="photo-dialog" aria-labelledby="photo-title"><div class="lightbox-toolbar"><p id="photo-title">Memory photo</p><button class="icon-button" id="close-photo" type="button" aria-label="Close photo">×</button></div><img id="full-photo" alt=""><div class="lightbox-footer"><button class="button button-light" id="previous-photo" type="button" aria-label="Previous photo">←</button><p id="photo-position" aria-live="polite"></p><button class="button button-light" id="next-photo" type="button" aria-label="Next photo">→</button></div></dialog>
 </body>
 </html>
